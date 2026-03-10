@@ -1,0 +1,7 @@
+streamlit
+pymupdf
+openai
+numpy
+faiss-cpu
+sentence-transformers
+scikit-learn
