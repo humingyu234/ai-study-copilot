@@ -2,11 +2,14 @@ import time
 import streamlit as st
 import fitz
 from openai import OpenAI
-from text_chunker import clean_text, split_text_into_chunks, extract_pdf_chunks_with_pages
+from text_chunker import extract_pdf_chunks_with_pages
 from embedding_store import (
     build_vector_index,
     build_keyword_index,
-    hybrid_search
+    hybrid_search,
+    save_all_indexes,
+    load_all_indexes,
+    indexes_exist
 )
 
 # =========================
@@ -59,46 +62,86 @@ deepseek_api_key = st.text_input("请输入你的 DeepSeek API Key", type="passw
 uploaded_file = st.file_uploader("上传一个 PDF 文件", type=["pdf"])
 
 if uploaded_file is not None:
+    # 只读一次 PDF
+    pdf_bytes = uploaded_file.read()
+    st.session_state.pdf_bytes = pdf_bytes
 
-    # 如果用户上传了新文件，就重新建索引并清空历史
+    # 如果用户上传了新文件，就重新处理
     if st.session_state.last_file_name != uploaded_file.name:
         st.session_state.last_file_name = uploaded_file.name
         st.session_state.chat_history = []
         st.session_state.rag_logs = []
-
-        # 读取 PDF 二进制
-        pdf_bytes = uploaded_file.read()
-        st.session_state.pdf_bytes = pdf_bytes
 
         # 做全文预览
         preview_pdf = fitz.open(stream=pdf_bytes, filetype="pdf")
         full_text = ""
         for page in preview_pdf:
             full_text += page.get_text()
-
         st.session_state.full_text_preview = full_text
 
-        # 正式逐页切块
-        pdf = fitz.open(stream=pdf_bytes, filetype="pdf")
-        chunk_items = extract_pdf_chunks_with_pages(
-            pdf,
-            chunk_size=2000,
-            overlap=200,
-            source_name=uploaded_file.name
-        )
+        # 优先尝试加载本地索引
+        if indexes_exist():
+            loaded = load_all_indexes()
 
-        # 测试阶段先限制前 10 个 chunk
-        chunk_items = chunk_items[:10]
+            if loaded is not None:
+                vector_index, chunk_items, vectorizer, tfidf_matrix = loaded
 
-        st.session_state.chunk_items = chunk_items
+                st.session_state.vector_index = vector_index
+                st.session_state.vectorizer = vectorizer
+                st.session_state.tfidf_matrix = tfidf_matrix
+                st.session_state.chunk_items = chunk_items
 
-        # 建立索引（只做一次）
-        vector_index, _ = build_vector_index(chunk_items)
-        vectorizer, tfidf_matrix = build_keyword_index(chunk_items)
+                st.success("检测到本地索引，已直接加载")
+            else:
+                st.warning("本地索引加载失败，将重新构建")
 
-        st.session_state.vector_index = vector_index
-        st.session_state.vectorizer = vectorizer
-        st.session_state.tfidf_matrix = tfidf_matrix
+                pdf = fitz.open(stream=pdf_bytes, filetype="pdf")
+                chunk_items = extract_pdf_chunks_with_pages(
+                    pdf,
+                    chunk_size=2000,
+                    overlap=200,
+                    source_name=uploaded_file.name
+                )
+
+                vector_index, _ = build_vector_index(chunk_items)
+                vectorizer, tfidf_matrix = build_keyword_index(chunk_items)
+
+                save_all_indexes(
+                    vector_index=vector_index,
+                    chunk_items=chunk_items,
+                    vectorizer=vectorizer,
+                    tfidf_matrix=tfidf_matrix
+                )
+
+                st.session_state.vector_index = vector_index
+                st.session_state.vectorizer = vectorizer
+                st.session_state.tfidf_matrix = tfidf_matrix
+                st.session_state.chunk_items = chunk_items
+        else:
+            st.info("未找到本地索引，正在首次构建索引...")
+
+            pdf = fitz.open(stream=pdf_bytes, filetype="pdf")
+            chunk_items = extract_pdf_chunks_with_pages(
+                pdf,
+                chunk_size=2000,
+                overlap=200,
+                source_name=uploaded_file.name
+            )
+
+            vector_index, _ = build_vector_index(chunk_items)
+            vectorizer, tfidf_matrix = build_keyword_index(chunk_items)
+
+            save_all_indexes(
+                vector_index=vector_index,
+                chunk_items=chunk_items,
+                vectorizer=vectorizer,
+                tfidf_matrix=tfidf_matrix
+            )
+
+            st.session_state.vector_index = vector_index
+            st.session_state.vectorizer = vectorizer
+            st.session_state.tfidf_matrix = tfidf_matrix
+            st.session_state.chunk_items = chunk_items
 
     st.success("文件上传成功")
     st.write("文件名：", uploaded_file.name)
@@ -150,7 +193,7 @@ if uploaded_file is not None:
                     st.markdown(f"### 第 {i + 1} 段总结（第 {item['page']} 页）")
                     st.write(summary)
 
-                # 再做一次总总结，不只是简单拼接
+                # 再做一次总总结
                 combined_summaries = "\n\n".join(summaries)
 
                 final_response = chat_client.chat.completions.create(

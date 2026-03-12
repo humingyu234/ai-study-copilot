@@ -1,164 +1,221 @@
-# embedding_store.py
-
-"""
-这个文件负责“检索”这一层能力。
-
-当前版本做了 3 件事：
-
-1. 本地 embedding 向量检索（语义检索）
-2. TF-IDF 关键词检索
-3. 混合检索（把两种结果合并）
-
-为什么要这样做？
-
-- 向量检索擅长找“意思接近”的内容
-- 关键词检索擅长找“字面命中”的内容
-
-两者结合后，RAG 的召回效果通常会更稳。
-"""
-
+import os
+import pickle
+import hashlib
 import numpy as np
 import faiss
 
-# 本地 embedding 模型
 from sentence_transformers import SentenceTransformer
-
-# TF-IDF 关键词检索
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-# 加载本地 embedding 模型
-# 第一次运行时会自动下载模型，以后就会直接本地加载
+
+# =========================
+# 全局配置
+# =========================
+DATA_DIR = "data"
+
+# 本地 embedding 模型
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
 
+# =========================
+# 工具函数
+# =========================
+def ensure_data_dir():
+    """
+    确保 data 目录存在
+    """
+    os.makedirs(DATA_DIR, exist_ok=True)
+
+
+def get_file_hash(file_bytes):
+    """
+    根据 PDF 二进制内容生成 hash
+    用来区分是不是同一个文件
+    """
+    return hashlib.md5(file_bytes).hexdigest()
+
+
+def get_index_paths(file_hash):
+    """
+    根据 file_hash 生成一组索引文件路径
+    """
+    ensure_data_dir()
+
+    return {
+        "faiss": os.path.join(DATA_DIR, f"{file_hash}_faiss.index"),
+        "chunks": os.path.join(DATA_DIR, f"{file_hash}_chunks.pkl"),
+        "vectorizer": os.path.join(DATA_DIR, f"{file_hash}_vectorizer.pkl"),
+        "tfidf_matrix": os.path.join(DATA_DIR, f"{file_hash}_tfidf.npy"),
+        "meta": os.path.join(DATA_DIR, f"{file_hash}_meta.pkl"),
+    }
+
+
+# =========================
+# 向量索引构建
+# =========================
 def build_vector_index(chunk_items):
     """
-    作用：
-        用本地 embedding 模型，把所有 chunk 文本转成向量，
-        然后建立 FAISS 向量索引。
-
-    参数：
-        chunk_items : 列表，每个元素是一个字典，例如：
-            {
-                "chunk_id": 0,
-                "text": "这是一段文本",
-                "page": 1,
-                "source": "xxx.pdf"
-            }
-
-    返回：
-        index      : FAISS 向量索引
-        embeddings : 所有 chunk 对应的向量
+    把 chunk 文本转成 embedding，并建立 FAISS 索引
     """
-    # 取出所有 chunk 的文本
     texts = [item["text"] for item in chunk_items]
 
-    # 把文本转成 embedding 向量
     embeddings = model.encode(texts)
-
-    # 转成 numpy 数组，并指定为 float32
-    # FAISS 对数据类型有要求
     embeddings = np.array(embeddings).astype("float32")
 
-    # 获取向量维度
     dimension = embeddings.shape[1]
 
-    # 创建 FAISS 索引
     index = faiss.IndexFlatL2(dimension)
-
-    # 把所有向量加入索引
     index.add(embeddings)
 
     return index, embeddings
 
 
-def search_by_vector(query, index, chunk_items, top_k=3):
-    """
-    作用：
-        用“向量检索”的方式，根据用户问题找到最相似的 chunk。
-
-    参数：
-        query       : 用户问题
-        index       : FAISS 索引
-        chunk_items : 原始 chunk 列表
-        top_k       : 返回最相关的前几个结果
-
-    返回：
-        results : 检索结果列表
-    """
-    # 把用户问题转成 embedding 向量
-    query_embedding = model.encode([query])
-
-    # 转成 numpy 数组
-    query_embedding = np.array(query_embedding).astype("float32")
-
-    # 在 FAISS 索引中搜索最相近的 top_k 个向量
-    distances, indices = index.search(query_embedding, top_k)
-
-    results = []
-
-    # indices[0] 是当前 query 对应的结果下标列表
-    for rank, idx in enumerate(indices[0]):
-        if idx < len(chunk_items):
-            item = chunk_items[idx].copy()
-
-            # 这里把向量检索分数存进去，方便后续调试
-            # 注意：FAISS 的 L2 距离是“越小越相似”
-            item["vector_score"] = float(distances[0][rank])
-
-            results.append(item)
-
-    return results
-
-
+# =========================
+# 关键词索引构建
+# =========================
 def build_keyword_index(chunk_items):
     """
-    作用：
-        用 TF-IDF 为所有 chunk 建立关键词检索索引。
-
-    参数：
-        chunk_items : 原始 chunk 列表
-
-    返回：
-        vectorizer    : TF-IDF 向量器
-        tfidf_matrix  : 所有 chunk 的 TF-IDF 特征矩阵
+    建立 TF-IDF 关键词索引
     """
-    # 取出所有 chunk 文本
     texts = [item["text"] for item in chunk_items]
 
-    # 创建 TF-IDF 向量器
-    # token_pattern 用默认就行，这里先保持简单
     vectorizer = TfidfVectorizer()
-
-    # 对所有文本做 fit_transform
     tfidf_matrix = vectorizer.fit_transform(texts)
 
     return vectorizer, tfidf_matrix
 
 
+# =========================
+# 索引保存
+# =========================
+def save_all_indexes(file_hash, vector_index, chunk_items, vectorizer, tfidf_matrix):
+    """
+    保存：
+    1. FAISS 索引
+    2. chunk_items
+    3. TF-IDF vectorizer
+    4. TF-IDF matrix
+    """
+    paths = get_index_paths(file_hash)
+
+    # 保存 FAISS index
+    faiss.write_index(vector_index, paths["faiss"])
+
+    # 保存 chunk_items
+    with open(paths["chunks"], "wb") as f:
+        pickle.dump(chunk_items, f)
+
+    # 保存 vectorizer
+    with open(paths["vectorizer"], "wb") as f:
+        pickle.dump(vectorizer, f)
+
+    # 保存 tfidf_matrix
+    # 注意：这里把稀疏矩阵转成 dense 再存，简单直观
+    np.save(paths["tfidf_matrix"], tfidf_matrix.toarray())
+
+    # 额外保存一个小 meta 文件，方便调试
+    meta_info = {
+        "chunk_count": len(chunk_items),
+        "file_hash": file_hash,
+    }
+    with open(paths["meta"], "wb") as f:
+        pickle.dump(meta_info, f)
+
+
+# =========================
+# 索引加载
+# =========================
+def load_all_indexes(file_hash):
+    """
+    加载：
+    1. FAISS 索引
+    2. chunk_items
+    3. TF-IDF vectorizer
+    4. TF-IDF matrix
+    """
+    paths = get_index_paths(file_hash)
+
+    # 只要有一个文件缺失，就说明不能完整加载
+    required_files = [
+        paths["faiss"],
+        paths["chunks"],
+        paths["vectorizer"],
+        paths["tfidf_matrix"],
+    ]
+
+    if not all(os.path.exists(path) for path in required_files):
+        return None
+
+    # 读取 FAISS index
+    vector_index = faiss.read_index(paths["faiss"])
+
+    # 读取 chunk_items
+    with open(paths["chunks"], "rb") as f:
+        chunk_items = pickle.load(f)
+
+    # 读取 vectorizer
+    with open(paths["vectorizer"], "rb") as f:
+        vectorizer = pickle.load(f)
+
+    # 读取 tfidf_matrix
+    tfidf_dense = np.load(paths["tfidf_matrix"])
+    tfidf_matrix = tfidf_dense
+
+    return vector_index, chunk_items, vectorizer, tfidf_matrix
+
+
+def indexes_exist(file_hash):
+    """
+    判断这一份 PDF 的索引是否已经存在
+    """
+    paths = get_index_paths(file_hash)
+
+    required_files = [
+        paths["faiss"],
+        paths["chunks"],
+        paths["vectorizer"],
+        paths["tfidf_matrix"],
+    ]
+
+    return all(os.path.exists(path) for path in required_files)
+
+
+# =========================
+# 向量检索
+# =========================
+def search_by_vector(query, index, chunk_items, top_k=3):
+    """
+    根据用户问题做向量检索
+    """
+    query_embedding = model.encode([query])
+    query_embedding = np.array(query_embedding).astype("float32")
+
+    distances, indices = index.search(query_embedding, top_k)
+
+    results = []
+
+    for rank, idx in enumerate(indices[0]):
+        if idx < len(chunk_items):
+            item = chunk_items[idx].copy()
+            item["vector_score"] = float(distances[0][rank])
+            results.append(item)
+
+    return results
+
+
+# =========================
+# 关键词检索
+# =========================
 def search_by_keyword(query, vectorizer, tfidf_matrix, chunk_items, top_k=3):
     """
-    作用：
-        用“关键词检索”的方式，根据用户问题找到最相关的 chunk。
-
-    参数：
-        query        : 用户问题
-        vectorizer   : TF-IDF 向量器
-        tfidf_matrix : chunk 的 TF-IDF 特征矩阵
-        chunk_items  : 原始 chunk 列表
-        top_k        : 返回最相关的前几个结果
-
-    返回：
-        results : 检索结果列表
+    根据用户问题做 TF-IDF 关键词检索
     """
-    # 把 query 转成 TF-IDF 向量
     query_vector = vectorizer.transform([query])
 
-    # 计算 query 和所有 chunk 的相似度
+    # 如果 tfidf_matrix 是 ndarray，也能算 cosine_similarity
     similarities = cosine_similarity(query_vector, tfidf_matrix).flatten()
 
-    # 从大到小排序，取最相似的 top_k 个下标
     top_indices = np.argsort(similarities)[::-1][:top_k]
 
     results = []
@@ -166,57 +223,37 @@ def search_by_keyword(query, vectorizer, tfidf_matrix, chunk_items, top_k=3):
     for idx in top_indices:
         if idx < len(chunk_items):
             item = chunk_items[idx].copy()
-
-            # TF-IDF 相似度越大越相关
             item["keyword_score"] = float(similarities[idx])
-
             results.append(item)
 
     return results
 
 
+# =========================
+# 混合检索
+# =========================
 def hybrid_search(query, vector_index, vectorizer, tfidf_matrix, chunk_items, top_k=4):
     """
-    作用：
-        同时做：
-        1. 向量检索
-        2. 关键词检索
-
-        然后把两边结果合并、去重，形成混合检索结果。
-
-    参数：
-        query         : 用户问题
-        vector_index  : FAISS 向量索引
-        vectorizer    : TF-IDF 向量器
-        tfidf_matrix  : TF-IDF 特征矩阵
-        chunk_items   : 原始 chunk 列表
-        top_k         : 最终返回多少条结果
-
-    返回：
-        merged_results : 混合检索后的结果列表
+    同时做：
+    1. 向量检索
+    2. 关键词检索
+    然后合并结果并排序
     """
-    # 向量检索先取多一点，便于后面融合
     vector_results = search_by_vector(query, vector_index, chunk_items, top_k=top_k)
 
-    # 关键词检索也取同样数量
     keyword_results = search_by_keyword(
-        query,
-        vectorizer,
-        tfidf_matrix,
-        chunk_items,
+        query=query,
+        vectorizer=vectorizer,
+        tfidf_matrix=tfidf_matrix,
+        chunk_items=chunk_items,
         top_k=top_k
     )
 
-    # 用字典做去重，key 选择 chunk_id
     merged_dict = {}
 
-    # 先放入向量检索结果
     for item in vector_results:
-        chunk_id = item["chunk_id"]
-        merged_dict[chunk_id] = item
+        merged_dict[item["chunk_id"]] = item
 
-    # 再放入关键词检索结果
-    # 如果已经有同一个 chunk，就把分数信息补进去
     for item in keyword_results:
         chunk_id = item["chunk_id"]
 
@@ -225,19 +262,8 @@ def hybrid_search(query, vector_index, vectorizer, tfidf_matrix, chunk_items, to
         else:
             merged_dict[chunk_id] = item
 
-    # 转回列表
     merged_results = list(merged_dict.values())
 
-    # 为了方便排序，我们给每条结果一个“混合排序分数”
-    # 这里只做一个很简单、初学者友好的排序策略：
-    #
-    # - keyword_score 越大越好
-    # - vector_score 是距离，越小越好
-    #
-    # 所以我们把 vector_score 变成一个“越大越好”的值：
-    # vector_rank_score = 1 / (1 + vector_score)
-    #
-    # 然后再和 keyword_score 相加
     for item in merged_results:
         vector_score = item.get("vector_score", None)
         keyword_score = item.get("keyword_score", 0.0)
@@ -249,8 +275,69 @@ def hybrid_search(query, vector_index, vectorizer, tfidf_matrix, chunk_items, to
 
         item["hybrid_score"] = vector_rank_score + keyword_score
 
-    # 按 hybrid_score 从大到小排序
     merged_results.sort(key=lambda x: x["hybrid_score"], reverse=True)
 
-    # 最终只返回前 top_k 个
     return merged_results[:top_k]
+def save_all_indexes(vector_index, chunk_items, vectorizer, tfidf_matrix):
+    """
+    保存所有检索相关对象到本地 data/ 目录
+    """
+    os.makedirs("data", exist_ok=True)
+
+    # 1. 保存 FAISS 索引
+    faiss.write_index(vector_index, "data/faiss_index.bin")
+
+    # 2. 保存 chunk_items
+    with open("data/chunk_items.pkl", "wb") as f:
+        pickle.dump(chunk_items, f)
+
+    # 3. 保存 TF-IDF vectorizer
+    with open("data/vectorizer.pkl", "wb") as f:
+        pickle.dump(vectorizer, f)
+
+    # 4. 保存 TF-IDF matrix
+    with open("data/tfidf_matrix.pkl", "wb") as f:
+        pickle.dump(tfidf_matrix, f)
+
+
+def load_all_indexes():
+    """
+    从本地 data/ 目录加载所有检索相关对象
+    如果文件不完整，就返回 None
+    """
+    required_files = [
+        "data/faiss_index.bin",
+        "data/chunk_items.pkl",
+        "data/vectorizer.pkl",
+        "data/tfidf_matrix.pkl",
+    ]
+
+    if not all(os.path.exists(path) for path in required_files):
+        return None
+
+    vector_index = faiss.read_index("data/faiss_index.bin")
+
+    with open("data/chunk_items.pkl", "rb") as f:
+        chunk_items = pickle.load(f)
+
+    with open("data/vectorizer.pkl", "rb") as f:
+        vectorizer = pickle.load(f)
+
+    with open("data/tfidf_matrix.pkl", "rb") as f:
+        tfidf_matrix = pickle.load(f)
+
+    return vector_index, chunk_items, vectorizer, tfidf_matrix
+
+
+def indexes_exist():
+    """
+    判断本地索引是否已经存在
+    """
+    required_files = [
+        "data/faiss_index.bin",
+        "data/chunk_items.pkl",
+        "data/vectorizer.pkl",
+        "data/tfidf_matrix.pkl",
+    ]
+
+    return all(os.path.exists(path) for path in required_files)

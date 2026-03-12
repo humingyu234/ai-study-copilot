@@ -1,151 +1,178 @@
-## AI Study Copilot
+# AI Study Copilot
 
-AI Study Copilot is a Retrieval-Augmented Generation (RAG) based study assistant that allows users to upload PDF documents and ask questions about their content.
+一个基于 **RAG（Retrieval-Augmented Generation，检索增强生成）** 的 PDF 学习助手。  
+用户上传 PDF 后，系统会自动解析文档、建立检索索引，并支持文档总结与基于文档内容的问答。
 
-The system retrieves relevant document chunks and generates answers using a language model. It also provides source citations and supports short conversation memory for follow-up questions.
+---
 
-This project demonstrates a complete RAG pipeline with hybrid retrieval and basic observability, designed as an AI engineering learning project.
+## 项目简介
 
-## Features
+AI Study Copilot 是一个面向学习场景的 AI 文档助手。  
+系统会对 PDF 文档进行文本提取、清洗与切块，然后建立检索索引，通过检索增强生成（RAG）技术，让大语言模型基于文档内容回答问题。
 
-Upload and parse PDF documents
+系统同时结合：
 
-Text cleaning and chunking
+- **向量检索（Vector Retrieval）**：查找语义相似的内容
+- **关键词检索（Keyword Retrieval）**：查找字面匹配的内容
 
-Local embedding generation
+通过 **Hybrid Search（混合检索）** 提高文档问答的准确性。
 
-FAISS vector search
+---
 
-TF-IDF keyword search
+## 系统流程
 
-Hybrid retrieval (vector + keyword)
-
-Document-based question answering
-
-Source citation with page numbers
-
-Conversation memory
-
-Index caching for faster queries
-
-Basic observability logs (retrieval time and LLM time)
-
-## System Architecture
-
-The system follows a typical Retrieval-Augmented Generation workflow:
-
-PDF Upload
+```
+PDF
 ↓
-Text Extraction
+Text Extraction（文本提取）
 ↓
-Text Chunking
+Text Cleaning（文本清洗）
 ↓
-Embedding Generation
+Chunking（文本切块）
 ↓
-Vector Index (FAISS)
+Embedding（文本向量化）
+↓
+FAISS Vector Search（向量检索）
 +
-Keyword Index (TF-IDF)
+TF-IDF Keyword Search（关键词检索）
 ↓
-Hybrid Retrieval
+Hybrid Retrieval（混合检索）
 ↓
-LLM Answer Generation
+LLM Generation（大语言模型生成）
 ↓
-Source Citation
+Answer + Citation（回答 + 引用）
+```
 
-## Project Structure
-ai-study-copilot
-│
-├── app.py
-├── text_chunker.py
-├── embedding_store.py
-├── requirements.txt
-├── .env.example
-├── .gitignore
-└── README.md
+---
 
-app.py
-Main Streamlit application.
+## 当前功能
 
-text_chunker.py
-Handles text cleaning and chunk splitting.
+- PDF 上传
+- 文本清洗
+- 文本切块（Chunking）
+- 本地 Embedding（文本向量化）
+- FAISS 向量检索
+- TF-IDF 关键词检索
+- Hybrid Search（混合检索）
+- AI 文档总结
+- AI 文档问答
+- 对话记忆
+- 引用溯源（页码 / chunk / source）
+- 运行日志（Observability，可观测性）
+- 性能指标展示（检索耗时 / LLM 耗时 / 总耗时）
+- Streamlit 网页界面
 
-embedding_store.py
-Builds the vector index, keyword index, and hybrid retrieval logic.
+---
 
-## Installation
+## 项目结构
 
-Clone the repository:
-git clone https://github.com/yourname/ai-study-copilot.git
-cd ai-study-copilot
-Install dependencies:
+```
+ai-study-copilot/
+├── app.py                # Streamlit 主程序，负责界面与整体流程
+├── text_chunker.py       # 文本清洗与切块模块
+├── embedding_store.py    # 检索相关模块（向量检索 / 关键词检索 / 混合检索）
+├── requirements.txt      # 项目依赖
+├── README.md             # 项目说明文档
+└── data/                 # 本地索引缓存目录（运行后生成）
+```
+
+---
+
+## 技术栈
+
+- Python
+- Streamlit（Web 应用框架）
+- PyMuPDF（PDF 文本提取）
+- Sentence Transformers（文本向量化模型）
+- FAISS（向量检索）
+- scikit-learn（TF-IDF 关键词检索）
+- DeepSeek API（大语言模型）
+
+---
+
+## 安装依赖
+
+```bash
 pip install -r requirements.txt
+```
 
-## Run the Project
-Start the Streamlit app:
+---
+
+## 运行项目
+
+```bash
 streamlit run app.py
-Then open your browser and visit:
+```
+
+运行后浏览器打开：
+
+```
 http://localhost:8501
-Upload a PDF and start asking questions about the document.
+```
 
-## Example Workflow
+---
 
-1.Upload a PDF document
+## 使用方法
 
-2.The system extracts and cleans text
+1. 运行项目
+2. 输入 DeepSeek API Key
+3. 上传 PDF 文件
+4. 查看 PDF 内容预览
+5. 点击“让 AI 总结这篇 PDF”生成文档总结
+6. 在问答框输入问题进行文档问答
+7. 查看引用溯源与运行日志
 
-3.The text is split into chunks
+---
 
-4.Embeddings are generated for each chunk
+## 项目特点
 
-5.FAISS builds a vector index
+### Hybrid Search（混合检索）
 
-6.TF-IDF builds a keyword index
+系统结合：
 
-7.Hybrid retrieval selects relevant chunks
+- 向量检索（语义相似）
+- 关键词检索（文本匹配）
 
-8.The LLM generates answers based on retrieved context
+两种方式融合后，可以提升 RAG 系统的召回能力。
 
-9.The system shows answers with source citations
+### Citation（引用溯源）
 
-## Tech Stack
+回答结果会显示来源信息：
 
-Python
-Streamlit
-FAISS
-Sentence Transformers
-Scikit-learn (TF-IDF)
-DeepSeek API
+- source（文件名）
+- page（页码）
+- chunk_id（文本块编号）
 
-## Observability
+方便验证答案是否来自文档。
 
-The system logs basic runtime metrics for each query:
+### Observability（可观测性）
 
-Retrieval time
+系统记录：
 
-LLM generation time
+- 检索耗时
+- LLM 耗时
+- 总耗时
+- 命中的 chunks
 
-Total response time
+方便调试和分析 RAG 系统表现。
 
-Retrieved chunk information
+---
 
-These logs help analyze system behavior and debug retrieval performance.
+## 后续可扩展方向
 
-## Future Improvements
+- 多文档知识库
+- 更适合中文的 Embedding 模型
+- Reranker（重排序模块）
+- Web 部署（Streamlit Cloud / Docker）
 
-Possible extensions for this project include:
+---
 
-Multi-document knowledge base
+## 项目定位
 
-Persistent vector database
+该项目是一个 **RAG（Retrieval-Augmented Generation）应用系统示例**，重点展示：
 
-Improved retrieval ranking
-
-Web deployment
-
-UI improvements
-
-Agent-based workflows
-
-## License
-
-This project is intended for educational and experimental purposes.
+- 文档处理能力
+- 检索增强生成流程
+- 向量检索与关键词检索结合
+- LLM 应用集成
+- 基础工程结构

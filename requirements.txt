@@ -1,7 +1,7 @@
-streamlit
-pymupdf
-openai
-numpy
-faiss-cpu
-sentence-transformers
-scikit-learn
+streamlit 网页界面框架
+pymupdf 读取PDF文本
+openai 调deepseek的API的客户端库 虽然名字是openai但是连的是ds的接口
+numpy 处理向量和数组 
+faiss-cpu 向量检索库
+sentence-transformers 本地embedding（文本向量化）模型库
+scikit-learn 做TF-IDE（关键词检索）和相似度计算
